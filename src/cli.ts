@@ -38,6 +38,7 @@ cli
   .option('--peer', 'Include peerDependencies in the update process')
   .option('--maturity-period [days]', 'wait period in days before upgrading to newly released packages (default: 7 when flag is used, 0 when not used)')
   .option('--concurrency <requests>', 'number of concurrent requests when resolving dependencies', { default: 10 })
+  .option('--timeout <ms>', 'timeout in milliseconds for each package fetch request', { default: 10000 })
   .action(async (mode: RangeMode | undefined, options: Partial<CheckOptions>) => {
     if (mode) {
       if (!MODE_CHOICES.includes(mode)) {

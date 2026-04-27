@@ -12,6 +12,10 @@
 <img src='./screenshots/r-major.png' width='600' alt='Recursive mode' />
 </p>
 
+## 与 antfu-collective/taze 对比 新增功能
+
+- 增加可配置的超时时间
+
 ## Features
 
 - Built-in support for monorepos
