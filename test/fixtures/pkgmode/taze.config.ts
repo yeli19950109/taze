@@ -1,4 +1,4 @@
-import { defineConfig } from 'taze'
+import { defineConfig } from '@whyjs/taze'
 
 export default defineConfig({
   exclude: [
