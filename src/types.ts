@@ -1,8 +1,11 @@
+import type { RetryOptions } from 'get-npm-meta'
 import type { Agent } from 'package-manager-detector'
 import type { PnpmWorkspaceYaml } from 'pnpm-workspace-yaml'
-import type { Document } from 'yaml'
+import type { Document, Scalar } from 'yaml'
 import type { MODE_CHOICES } from './constants'
 import type { SortOption } from './utils/sort'
+
+export type { RetryOptions }
 
 export type RangeMode = typeof MODE_CHOICES[number]
 export type PackageMode = Exclude<RangeMode, 'default'> | 'ignore'
@@ -18,6 +21,7 @@ export type DepType
     | 'pnpm-workspace'
     | 'bun-workspace'
     | 'yarn-workspace'
+    | 'github-actions'
 
 export const DependenciesTypeShortMap = {
   'packageManager': 'package-manager',
@@ -31,6 +35,7 @@ export const DependenciesTypeShortMap = {
   'pnpm-workspace': 'pnpm-workspace',
   'bun-workspace': 'bun-workspace',
   'yarn-workspace': 'yarn-workspace',
+  'github-actions': 'github-actions',
 }
 
 export type Protocol = 'npm' | 'jsr'
@@ -43,6 +48,56 @@ export interface RawDep {
   parents?: string[]
   protocol?: Protocol
   hexHash?: string
+  /**
+   * Extra metadata carried by GitHub Actions dependencies (`source: 'github-actions'`).
+   * Describes how the `uses:` reference is written so it can be updated in place.
+   */
+  githubAction?: GitHubActionInfo
+}
+
+export type GitHubActionStyle = 'auto' | 'tag' | 'sha'
+
+export interface GitHubActionsOptions {
+  /**
+   * How to write updated `uses:` references.
+   *
+   * - `auto` — preserve each action's existing style (tag stays a tag, a
+   *   SHA-pinned action stays SHA-pinned with a refreshed `# vX.Y.Z` comment)
+   * - `tag` — always write a tag reference
+   * - `sha` — always write a commit-SHA reference with a `# vX.Y.Z` comment
+   *
+   * @default 'auto'
+   */
+  style?: GitHubActionStyle
+}
+
+export interface GitHubActionInfo {
+  /**
+   * The `owner/repo` slug of the action (without any subpath).
+   */
+  repo: string
+  /**
+   * Any subpath after `owner/repo`, including the leading slash
+   * (e.g. `/.github/workflows/ci.yml` for a reusable workflow call), or `''`.
+   */
+  subpath: string
+  /**
+   * How the reference is currently written in the file.
+   */
+  style: 'tag' | 'sha'
+  /**
+   * The current commit SHA, when the reference is SHA-pinned.
+   */
+  sha?: string
+  /**
+   * The resolved target commit SHA (filled in during resolving).
+   */
+  targetSha?: string
+  /**
+   * Reference to the YAML scalar node holding the `uses:` value, used to
+   * update the reference in place while preserving formatting and comments.
+   */
+  node?: Scalar
 }
 
 export type DiffType = 'major' | 'minor' | 'patch' | 'error' | null
@@ -57,6 +112,11 @@ export interface PackageData {
   provenance?: Record<string, boolean | 'trustedPublisher'>
   deprecated?: Record<string, string | boolean>
   integrity?: Record<string, string>
+  /**
+   * Map of GitHub Action tag -> commit SHA (only populated for
+   * `source: 'github-actions'` dependencies).
+   */
+  shaMap?: Record<string, string>
 }
 
 export interface JsrPackageMeta {
@@ -94,6 +154,14 @@ export interface CommonOptions {
   ignorePaths?: string | string[]
   ignoreOtherWorkspaces?: boolean
   include?: string | string[]
+  /**
+   * Dependencies to exclude from being checked/updated.
+   *
+   * Supports `name@range` to exclude only the matching versions (e.g. `typescript@7`
+   * or `typescript@^7||^8`) instead of excluding the whole package, so other
+   * major/minor/patch updates for that package are still offered (including in
+   * interactive mode).
+   */
   exclude?: string | string[]
   loglevel?: LogLevel
   failOnOutdated?: boolean
@@ -108,6 +176,12 @@ export interface CommonOptions {
    */
   force?: boolean
   /**
+   * API endpoint for fetching npm package metadata via `fast-npm-meta`
+   *
+   * @default 'https://npm.antfu.dev/'
+   */
+  fastNpmMetaApiEndpoint?: string
+  /**
    * Include peerDependencies in the update process
    */
   peer?: boolean
@@ -121,6 +195,16 @@ export interface CommonOptions {
    * @default builtin addons
    */
   addons?: Addon[]
+  /**
+   * Check and update GitHub Actions referenced in `.github/workflows/*.yml`
+   * and composite `action.yml` files.
+   *
+   * Auto-enabled when a `.github/workflows` directory exists. Set to `false`
+   * to opt out, or pass an object to configure the behavior.
+   *
+   * @default true
+   */
+  githubActions?: boolean | GitHubActionsOptions
 }
 
 export type DepFieldOptions = Partial<Record<DepType, boolean>>
@@ -131,6 +215,15 @@ export interface CheckOptions extends CommonOptions {
   all?: boolean
   sort?: SortOption
   interactive?: boolean
+  /**
+   * Output update info as JSON to stdout.
+   *
+   * When enabled, `interactive` is ignored and no progress bars,
+   * tables, or tips are printed.
+   *
+   * @default false
+   */
+  json?: boolean
   install?: boolean
   update?: boolean
   global?: boolean
@@ -141,11 +234,22 @@ export interface CheckOptions extends CommonOptions {
    */
   concurrency?: number
   /**
-   * Timeout in milliseconds for each package fetch request
+   * Request timeout in milliseconds when fetching package metadata
    *
-   * @default 10000
+   * @default 5000
    */
-  timeout?: number
+  requestTimeout?: number
+  /**
+   * Retry behavior when fetching package metadata from the registry fails
+   *
+   * Can be:
+   * - a number for simple retry count
+   * - `false` to disable retries
+   * - a `RetryOptions` object for fine-grained control
+   *
+   * @default 4
+   */
+  retry?: number | false | RetryOptions
   /**
    * Group dependencies by source, e.g. dependencies, devDependencies, etc.
    *
@@ -264,6 +368,21 @@ export interface PackageYamlMeta extends BasePackageMeta {
   yamlDocument: Document
 }
 
+export interface GitHubActionMeta extends BasePackageMeta {
+  /**
+   * File type — a GitHub workflow or composite action YAML file
+   */
+  type: 'github-action'
+  /**
+   * Raw parsed YAML object
+   */
+  raw: Record<string, unknown>
+  /**
+   * Raw YAML Document, used to update `uses:` references in place
+   */
+  yamlDocument: Document
+}
+
 export type PackageMeta
   = | PackageJsonMeta
     | GlobalPackageMeta
@@ -271,6 +390,7 @@ export type PackageMeta
     | BunWorkspaceMeta
     | YarnWorkspaceMeta
     | PackageYamlMeta
+    | GitHubActionMeta
 
 export type DependencyFilter = (dep: RawDep) => boolean | Promise<boolean>
 export type DependencyResolvedCallback = (packageName: string | null, depName: string, progress: number, total: number) => void

@@ -1,13 +1,76 @@
-import type { CheckOptions, CommonOptions } from './types'
+import type { CheckOptions, CommonOptions, GitHubActionStyle, RetryOptions } from './types'
 import process from 'node:process'
 import { toArray } from '@antfu/utils'
-import _debug from 'debug'
 import deepmerge from 'deepmerge'
+import { createDebug } from 'obug'
 import { createConfigLoader } from 'unconfig'
 import { DEFAULT_CHECK_OPTIONS } from './constants'
-import { detectMaturityConfig } from './utils/detectMaturity'
+import { inferConfig } from './utils/inferConfig'
 
-const debug = _debug('taze:config')
+const debug = createDebug('taze:config')
+
+/**
+ * The raw option shape accepted from the CLI, before normalization.
+ *
+ * The CLI exposes a few options as flat flags (`--retry`, `--retry-factor`,
+ * `--github-actions-style`, ...) that are shaped into their structured
+ * `CheckOptions` form by {@link resolveConfig}.
+ */
+export interface CliOptions extends Omit<CheckOptions, 'retry'> {
+  /**
+   * `true` for a bare `--retry`, `false` for `--no-retry`, a number for a
+   * retry count, or a structured {@link RetryOptions} object.
+   */
+  retry?: number | boolean | RetryOptions
+  retryFactor?: number
+  retryMinTimeout?: number
+  retryMaxTimeout?: number
+  retryRandomize?: boolean
+  githubActionsStyle?: GitHubActionStyle
+}
+
+/**
+ * Fold the CLI's flat flags into their structured `CheckOptions` form and drop
+ * the CLI-only keys, so downstream config merging sees a clean `CommonOptions`.
+ */
+function normalizeCliOptions(input: CliOptions): CommonOptions {
+  const {
+    retry,
+    retryFactor: factor,
+    retryMinTimeout: minTimeout,
+    retryMaxTimeout: maxTimeout,
+    retryRandomize: randomize,
+    githubActionsStyle,
+    ...rest
+  } = input
+
+  const options = rest as CheckOptions
+
+  // assemble retry behavior from `--retry` and the fine-grained `--retry-*` flags
+  const hasFineGrained = factor != null || minTimeout != null || maxTimeout != null || randomize != null
+  if (retry !== false && hasFineGrained) {
+    options.retry = {
+      ...(retry != null && typeof retry === 'object' ? retry : {}),
+      ...typeof retry === 'number' && { retries: retry },
+      ...factor != null && { factor },
+      ...minTimeout != null && { minTimeout },
+      ...maxTimeout != null && { maxTimeout },
+      ...randomize != null && { randomize },
+    }
+  }
+  else if (typeof retry === 'number' || retry === false || (retry != null && typeof retry === 'object')) {
+    options.retry = retry
+  }
+  // a bare `--retry` (`retry === true`) or absent flag falls back to the config
+  // file / default retry count, so leave `retry` unset here
+
+  // `--github-actions-style` maps to the structured `githubActions` option,
+  // unless GitHub Actions checking is disabled (`--no-github-actions`)
+  if (options.githubActions !== false && githubActionsStyle)
+    options.githubActions = { style: githubActionsStyle }
+
+  return options
+}
 
 function normalizeConfig(options: CommonOptions) {
   // interop
@@ -27,10 +90,10 @@ function normalizeConfig(options: CommonOptions) {
 }
 
 export async function resolveConfig(
-  options: CommonOptions,
+  options: CliOptions | CommonOptions,
 ): Promise<CommonOptions> {
   const defaults = DEFAULT_CHECK_OPTIONS
-  options = normalizeConfig(options)
+  options = normalizeConfig(normalizeCliOptions(options))
 
   const loader = createConfigLoader<CommonOptions>({
     sources: [
@@ -63,12 +126,22 @@ export async function resolveConfig(
   }
 
   const checkMerged = merged as CheckOptions
-  if (!checkMerged.global && (checkMerged.maturityPeriod == null || !checkMerged.maturityPeriodExclude?.length)) {
-    const detected = await detectMaturityConfig(checkMerged.cwd || process.cwd())
-    if (checkMerged.maturityPeriod == null && detected?.maturityPeriod != null)
-      checkMerged.maturityPeriod = detected.maturityPeriod
-    if (!checkMerged.maturityPeriodExclude?.length && detected?.maturityPeriodExclude.length)
-      checkMerged.maturityPeriodExclude = detected.maturityPeriodExclude
+  if (!checkMerged.global) {
+    const inferred = await inferConfig(checkMerged.cwd || process.cwd())
+
+    // Maturity period is only inferred when the user hasn't set it.
+    if (checkMerged.maturityPeriod == null && inferred.maturityPeriod != null)
+      checkMerged.maturityPeriod = inferred.maturityPeriod
+    if (!checkMerged.maturityPeriodExclude?.length && inferred.maturityPeriodExclude.length)
+      checkMerged.maturityPeriodExclude = inferred.maturityPeriodExclude
+
+    // pnpm's update.ignoreDeps / updateConfig.ignoreDependencies mean "never
+    // update these packages". Fold them into `exclude` (additive) so they are
+    // always honored on top of the user's own config.
+    if (inferred.updateIgnores.length) {
+      const existing = toArray(checkMerged.exclude)
+      checkMerged.exclude = [...new Set([...existing, ...inferred.updateIgnores])]
+    }
   }
 
   return merged

@@ -8,6 +8,10 @@
 
 <pre align="center">npx taze <b>-r</b></pre>
 
+<p align="center">or for <em>agents</em> to consume</p>
+
+<pre align="center">npx taze -r <b>--json</b></pre>
+
 <p align='center'>
 <img src='./screenshots/r-major.png' width='600' alt='Recursive mode' />
 </p>
@@ -30,7 +34,7 @@ npm i -g uploom        # → uploom（更短的 npx 入口）
 
 ### 相较上游新增功能
 
-- **可配置请求超时**：`--timeout <ms>`（默认 10000）
+- **可配置请求超时与重试**：`--request-timeout <ms>`（默认 5000）以及 `--retry` / `--retry-*`
 - **npm 镜像管理**（兼容 nrm 使用习惯）：
   - 切换镜像通过 `npm config set`，不直接改写 `~/.npmrc` 中的 token
   - 自定义镜像列表保存在 `~/.taze/registries.yaml`（YAML 格式）
@@ -59,6 +63,10 @@ npx uploom minor -w
 - Built-in support for monorepos
 - No installation required — `npx taze`
 - Safe by default — updates in the version range you are allowed
+- Interactive mode to select which packages to update
+- Respects `package.json`'s `engines` field and your package manager's config
+- Updates GitHub Actions in your workflows, with optional SHA pinning
+- Agents compatible JSON output
 
 ## Usage
 
@@ -112,6 +120,16 @@ taze --include lodash,webpack
 taze --include /react/ --exclude react-dom # regex is also supported
 ```
 
+`--exclude` (and `--include`) also accepts a `name@range` selector to exclude only a specific version range of a package, instead of the whole package. This is useful to block a specific major version while still allowing other updates (including in interactive mode):
+
+```bash
+# skip typescript's major v7 (and later), but still offer v6 minor/patch updates
+taze --exclude typescript@7
+taze --exclude "typescript@^7||^8" # multiple ranges can be combined with ||
+```
+
+Dependencies listed in pnpm's `update.ignoreDeps` in `pnpm-workspace.yaml` are automatically excluded, so packages you tell pnpm never to update are also skipped by taze.
+
 ### Locked Versions
 
 Locked (fixed version without `^` or `~`) packages are skipped by default, use `taze --include-locked` or `taze -l` to show them.
@@ -153,6 +171,44 @@ taze stable --maturity-period 14
 > [!NOTE]
 > This kind of filtering is sometimes called `cooldown` or `minimumReleaseAge` by other tools.
 
+### JSON Output
+
+Pass `--json` to output the resolved update info as JSON to stdout instead of the rendered table. This is handy for scripting and CI.
+
+```bash
+taze --json
+```
+
+When `--json` is used, `--interactive` is ignored and no progress bars, tables, or tips are printed. By default only dependencies with an available update are included; combine it with `--all` to include up-to-date dependencies too. It can still be combined with `-w` to write the changes back to `package.json`.
+
+### GitHub Actions
+
+`taze` also checks the GitHub Actions used in your workflows. When a `.github/workflows` directory exists, it scans `.github/workflows/*.{yml,yaml}`, composite actions (`.github/actions/**/action.{yml,yaml}` and a repo-root `action.{yml,yaml}`), and reusable workflow calls, then reports newer versions alongside your npm dependencies. It works with every mode (`major`, `minor`, ...), `--interactive`, `--json`, and `-w`.
+
+```bash
+taze major -w      # also updates outdated actions, e.g. actions/checkout@v3 -> @v4
+taze --no-github-actions   # opt out
+```
+
+References are updated in place while preserving the granularity you wrote (`@v4` → `@v5`, `@v4.1.1` → `@v4.2.0`). By default the existing style of each action is kept: tag references stay tags, while SHA-pinned references stay pinned (with a refreshed `# vX.Y.Z` comment). Choose a style explicitly with `--github-actions-style <auto|tag|sha>`:
+
+```yaml
+# style: sha — pin to an immutable commit for supply-chain safety
+- uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+# style: tag
+- uses: actions/checkout@v5
+```
+
+Only `v`-prefixed version tags are considered; branch refs (`@main`), non-`v` tags, `docker://` and local (`./`) actions are left untouched. Filtering (`--include`/`--exclude`/`packageMode`), the maturity-period cool-down, and mode all apply, matched by the action's `owner/repo` name.
+
+Versions are fetched from the GitHub REST API. Set a `GITHUB_TOKEN` (or `GH_TOKEN`) to raise the rate limit from 60 to 5000 requests/hour:
+
+```bash
+GITHUB_TOKEN=xxxx taze major
+```
+
+If neither is set, taze falls back to a token from the [GitHub CLI](https://cli.github.com) (`gh auth token`) when you're logged in, so an authenticated `gh` needs no extra configuration.
+
 ### Config file
 
 With `taze.config.js` file, you can configure the same options the command has.
@@ -167,6 +223,12 @@ export default defineConfig({
   ],
   // fetch latest package info from registry without cache
   force: true,
+  // use a custom fast-npm-meta compatible API endpoint
+  fastNpmMetaApiEndpoint: 'https://npm.example.com/',
+  // retry behavior when fetching package metadata fails:
+  // a number for retry count, `false` to disable, or an object for fine-grained
+  // control, e.g. { retries: 4, factor: 2, minTimeout: 1000, maxTimeout: 30_000, randomize: false }
+  retry: 4,
   // write to package.json
   write: true,
   // run `npm install` or `yarn install` right after bumping
@@ -193,6 +255,11 @@ export default defineConfig({
   // disable checking for "overrides" package.json field
   depFields: {
     overrides: false
+  },
+  // GitHub Actions updates: `true` (default) | `false` to opt out | options object
+  githubActions: {
+    // 'auto' (preserve existing style) | 'tag' | 'sha'
+    style: 'auto'
   }
 })
 ```
@@ -209,6 +276,8 @@ They work well but have different focuses and feature sets, try them out as well
 ## Thanks
 
 Great thanks to [@sinoon](https://github.com/sinoon) who helped a lot with idea brainstorming and feedback discussion.
+
+The GitHub Actions updating feature is inspired by and credits [actions-up](https://github.com/azat-io/actions-up) by [Azat S.](https://azat.io), which pioneered the interactive SHA-pinning workflow this builds upon.
 
 ## License
 

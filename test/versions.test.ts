@@ -1,6 +1,5 @@
 import { expect, it } from 'vitest'
-import { getPackageData } from '../src/io/resolves'
-import { filterDeprecatedVersions, filterVersionsByMaturityPeriod, getMaxSatisfying, getVersionRangePrefix } from '../src/utils/versions'
+import { changeVersionRange, filterDeprecatedVersions, filterVersionsByMaturityPeriod, getMaxSatisfying, getVersionRangePrefix } from '../src/utils/versions'
 
 it('getVersionRange', () => {
   expect('~').toBe(getVersionRangePrefix('~1.2.3'))
@@ -27,8 +26,24 @@ it('getVersionRange', () => {
   expect('*').toBe(getVersionRangePrefix('x'))
 })
 
-it('getMaxSatisfying', async () => {
-  const { versions, tags } = await getPackageData('typescript')
+it('changeVersionRange', () => {
+  expect(changeVersionRange('^1.2.3', 'patch')).toBe('~1.2.3')
+  expect(changeVersionRange('>1.2.3', 'minor')).toBe('^1.2.4')
+  expect(changeVersionRange('not-a-range', 'minor')).toBeNull()
+})
+
+it('getMaxSatisfying', () => {
+  const versions = [
+    '5.9.0',
+    '6.0.1',
+    '6.1.0',
+    '7.0.0',
+    '7.1.0',
+    '8.0.0-beta.1',
+  ]
+  const tags = {
+    latest: '7.1.0',
+  }
   const latest = tags.latest
   const newest = versions.at(-1)
 
@@ -36,8 +51,8 @@ it('getMaxSatisfying', async () => {
   expect(getMaxSatisfying(versions, '', 'default', tags)).toBeUndefined()
   expect(getMaxSatisfying(versions, '*', 'default', tags)).toBeUndefined()
   expect(getMaxSatisfying(versions, '6.0.0', 'default', tags)).toBeUndefined()
-  expect(latest).toBe(getMaxSatisfying(versions, '^6.0.0', 'default', tags))
-  expect(latest).toBe(getMaxSatisfying(versions, '>6.0.0', 'default', tags))
+  expect(latest).toBe(getMaxSatisfying(versions, '^7.0.0', 'default', tags))
+  expect(latest).toBe(getMaxSatisfying(versions, '>7.0.0', 'default', tags))
 
   // major
   expect(getMaxSatisfying(versions, '', 'major', tags)).not.toBeUndefined()
@@ -114,7 +129,18 @@ it('getMaxSatisfying', async () => {
     rc: '4.2.1-rc.3',
     experimental: '0.0.0-experimental-4508873393-20240430',
   }))
-}, 10_000)
+
+  // should cap prerelease ranges to the channel dist-tag when `latest` is stable,
+  // so a build-hash snapshot (semver-ranked above the numeric beta) doesn't win. see #256
+  expect('1.0.0-beta.20').toBe(getMaxSatisfying([
+    '1.0.0-beta.19',
+    '1.0.0-beta.20',
+    '1.0.0-beta.9-e89174b',
+  ], '^1.0.0-beta.20', 'default', {
+    latest: '0.45.2',
+    beta: '1.0.0-beta.20',
+  }))
+})
 
 it('getMaxSatisfying - maturity period respects latest/next tags', () => {
   // maturity period: latest tag filtered out -> fall back to newest in filtered list
@@ -131,6 +157,40 @@ it('getMaxSatisfying - maturity period respects latest/next tags', () => {
     '^1.0.0',
     'latest',
     { latest: '1.0.6' },
+  ))
+
+  // maturity period: stable latest tag filtered out -> skip mature prereleases
+  expect('1.2.5').toBe(getMaxSatisfying(
+    ['1.2.5', '1.3.0-rc.1', '1.3.0-rc.2'],
+    '^1.2.5',
+    'latest',
+    { latest: '1.3.0' },
+  ))
+
+  // maturity period: prerelease latest tag filtered out -> keep prerelease fallback
+  expect('1.3.0-rc.1').toBe(getMaxSatisfying(
+    ['1.2.5', '1.3.0-rc.1'],
+    '^1.2.5',
+    'latest',
+    { latest: '1.3.0-rc.2' },
+  ))
+
+  // maturity period: current on a prerelease track -> respect newer, mature prereleases
+  // even though the (excluded) latest tag is a stable release
+  expect('2.0.0-rc.3').toBe(getMaxSatisfying(
+    ['2.0.0-rc.1', '2.0.0-rc.2', '2.0.0-rc.3'],
+    '^2.0.0-rc.1',
+    'latest',
+    { latest: '2.0.0' }, // 2.0.0 too new, not in filtered list
+  ))
+
+  // maturity period: current is stable -> never fall back to a prerelease,
+  // even if it's the closest mature candidate below the (excluded) latest tag
+  expect('1.0.0').toBe(getMaxSatisfying(
+    ['1.0.0', '2.0.0-rc.1'],
+    '1.0.0',
+    'latest',
+    { latest: '2.0.0' }, // 2.0.0 too new, not in filtered list
   ))
 
   // maturity period: next tag filtered out -> fall back to newest in filtered list

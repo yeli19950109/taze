@@ -1,27 +1,28 @@
-import type { SemVer } from 'semver-es'
-import type { CheckOptions, DependencyFilter, DependencyResolvedCallback, DiffType, PackageData, PackageMeta, Protocol, RangeMode, RawDep, ResolvedDepChange } from '../types'
+import type { CheckOptions, DependencyFilter, DependencyResolvedCallback, DiffType, PackageData, PackageMeta, Protocol, RangeMode, RawDep, ResolvedDepChange, RetryOptions } from '../types'
 import { existsSync, promises as fs, lstatSync } from 'node:fs'
 import os from 'node:os'
 import process from 'node:process'
 import { newQueue } from '@henrygd/queue'
-import _debug from 'debug'
+import { createDebug } from 'obug'
 import { resolve } from 'pathe'
-import { eq, gt, lt, minVersion, satisfies } from 'semver-es'
+import { coerce, findMinimumForRange, isEqual, isGreater, isLess, isValid, satisfies } from 'verkit'
 import { diffSorter } from '../filters/diff-sorter'
-import { getMaturityPeriodExcludeRanges, getPackageMode, isVersionMaturityPeriodExcluded } from '../utils/config'
+import { getExcludeVersionRanges, getMaturityPeriodExcludeRanges, getPackageMode, isVersionInExcludedRanges } from '../utils/config'
 import { queueContext } from '../utils/context'
+import { fetchActionTags, fetchCommitDate, selectTarget } from '../utils/github'
 import { parsePnpmPackagePath, parseYarnPackagePath } from '../utils/package'
 import { fetchJsrPackageMeta, fetchPackage } from '../utils/packument'
 
 import { filterDeprecatedVersions, filterVersionsByMaturityPeriod, getMaxSatisfying, getPrefixedVersion } from '../utils/versions'
 
 const debug = {
-  cache: _debug('taze:cache'),
-  resolve: _debug('taze:resolve'),
+  cache: createDebug('taze:cache'),
+  resolve: createDebug('taze:resolve'),
 }
 
 let cache: Record<string, { cacheTime: number, data: PackageData }> = {}
 let cacheChanged = false
+const inflightRequests = new Map<string, Promise<PackageData>>()
 
 const cacheDir = resolve(os.tmpdir(), 'taze')
 const cachePath = resolve(cacheDir, 'cache.json')
@@ -59,9 +60,11 @@ export async function dumpCache() {
   }
 }
 
-export async function getPackageData(name: string, protocol: Protocol = 'npm', cwd?: string): Promise<PackageData> {
+export async function getPackageData(name: string, protocol: Protocol = 'npm', cwd?: string, requestTimeout?: number, retry?: number | false | RetryOptions, fastNpmMetaApiEndpoint?: string): Promise<PackageData> {
   let error: any
-  const cacheName = `${protocol}:${name}`
+  const cacheName = protocol === 'npm' && fastNpmMetaApiEndpoint
+    ? `${protocol}:${fastNpmMetaApiEndpoint}:${name}`
+    : `${protocol}:${name}`
 
   if (cache[cacheName]) {
     if (ttl(cache[cacheName].cacheTime) < cacheTTL) {
@@ -73,26 +76,191 @@ export async function getPackageData(name: string, protocol: Protocol = 'npm', c
     }
   }
 
-  try {
-    debug.resolve(`resolving ${cacheName}`)
-    const data = protocol === 'jsr' ? await fetchJsrPackageMeta(name) : await fetchPackage(name, false, cwd)
+  const inflightRequest = inflightRequests.get(cacheName)
 
-    if (data) {
-      cache[cacheName] = { data, cacheTime: now() }
-      cacheChanged = true
-      return data
+  if (inflightRequest) {
+    debug.cache(`in-flight hit for ${cacheName}`)
+    return inflightRequest
+  }
+
+  const request = (async () => {
+    try {
+      debug.resolve(`resolving ${cacheName}`)
+      const data = protocol === 'jsr'
+        ? await fetchJsrPackageMeta(name, requestTimeout)
+        : await fetchPackage(name, false, cwd, requestTimeout, retry, fastNpmMetaApiEndpoint)
+
+      if (data) {
+        cache[cacheName] = { data, cacheTime: now() }
+        cacheChanged = true
+        return data
+      }
+    }
+    catch (e) {
+      error = e
+    }
+
+    return {
+      tags: {},
+      versions: [],
+      error: error?.statusCode?.toString() || error,
+      deprecated: {},
+    }
+  })()
+
+  inflightRequests.set(cacheName, request)
+
+  try {
+    return await request
+  }
+  finally {
+    inflightRequests.delete(cacheName)
+  }
+}
+
+export async function getGitHubActionData(repo: string, requestTimeout?: number): Promise<PackageData> {
+  const cacheName = `gha:${repo}`
+
+  if (cache[cacheName]) {
+    if (ttl(cache[cacheName].cacheTime) < cacheTTL) {
+      debug.cache(`cache hit for ${cacheName}`)
+      return cache[cacheName].data
+    }
+    else {
+      delete cache[cacheName]
     }
   }
-  catch (e) {
-    error = e
+
+  const inflightRequest = inflightRequests.get(cacheName)
+  if (inflightRequest) {
+    debug.cache(`in-flight hit for ${cacheName}`)
+    return inflightRequest
   }
 
-  return {
-    tags: {},
-    versions: [],
-    error: error?.statusCode?.toString() || error,
-    deprecated: {},
+  const request = (async () => {
+    debug.resolve(`resolving ${cacheName}`)
+    const { versions, shaMap, error } = await fetchActionTags(repo, requestTimeout)
+    const data: PackageData = {
+      versions,
+      tags: versions.length ? { latest: versions[versions.length - 1] } : {},
+      shaMap,
+      error,
+    }
+    if (!error) {
+      cache[cacheName] = { data, cacheTime: now() }
+      cacheChanged = true
+    }
+    return data
+  })()
+
+  inflightRequests.set(cacheName, request)
+
+  try {
+    return await request
   }
+  finally {
+    inflightRequests.delete(cacheName)
+  }
+}
+
+export async function resolveGitHubAction(
+  raw: RawDep,
+  options: CheckOptions,
+  filter: DependencyFilter = () => true,
+): Promise<ResolvedDepChange> {
+  const dep = { ...raw } as ResolvedDepChange
+  dep.provenanceDowngraded = false
+
+  const info = raw.githubAction
+  const configMode = getPackageMode(raw.name, options)
+  const optionMode = options.mode ?? 'default'
+  const mode = (configMode
+    ? (configMode === optionMode
+        ? optionMode
+        : optionMode === 'default' ? configMode : 'ignore')
+    : optionMode) as RangeMode | 'ignore'
+
+  const noUpdate = (): ResolvedDepChange => {
+    dep.diff = null
+    dep.targetVersion = raw.currentVersion
+    dep.update = false
+    return dep
+  }
+
+  if (!info || !raw.update || mode === 'ignore' || !await Promise.resolve(filter(raw)))
+    return noUpdate()
+
+  const excludeRanges = getExcludeVersionRanges(raw.name, options)
+  if (excludeRanges === true)
+    return noUpdate()
+
+  const pkgData = await getGitHubActionData(info.repo, options.requestTimeout)
+  dep.pkgData = pkgData
+
+  if (pkgData.error) {
+    dep.diff = 'error'
+    dep.update = false
+    dep.resolveError = pkgData.error
+    return dep
+  }
+
+  const maturityExclude = getMaturityPeriodExcludeRanges(raw.name, options)
+  const maturityDays = options.maturityPeriod ?? 0
+  const cutoff = maturityDays > 0 ? Date.now() - maturityDays * 24 * 60 * 60 * 1000 : 0
+
+  const rejectedForMaturity = new Set<string>()
+  let target: { tag: string, resolvedTag: string } | undefined
+
+  while (true) {
+    const candidateTags = pkgData.versions.filter(t => !rejectedForMaturity.has(t))
+    const picked = selectTarget(raw.currentVersion, candidateTags, mode as RangeMode, {
+      reject: (parsed) => {
+        if (excludeRanges.length > 0) {
+          const coerced = coerce(parsed.raw)
+          if (coerced && isVersionInExcludedRanges(coerced, excludeRanges))
+            return true
+        }
+        return false
+      },
+    })
+
+    if (!picked)
+      break
+
+    // supply-chain cool-down: skip versions whose commit is younger than the
+    // configured maturity period, stepping down to the next candidate
+    if (cutoff > 0 && maturityExclude !== true) {
+      const coerced = coerce(picked.resolvedTag)
+      const isMaturityExcluded = coerced && maturityExclude.length > 0
+        && isVersionInExcludedRanges(coerced, maturityExclude)
+      if (!isMaturityExcluded) {
+        const sha = pkgData.shaMap?.[picked.resolvedTag]
+        const date = sha ? await fetchCommitDate(info.repo, sha, options.requestTimeout) : undefined
+        if (date && new Date(date).getTime() > cutoff) {
+          rejectedForMaturity.add(picked.resolvedTag)
+          continue
+        }
+        if (date)
+          dep.targetVersionTime = date
+      }
+    }
+
+    target = picked
+    break
+  }
+
+  if (!target || target.tag === raw.currentVersion)
+    return noUpdate()
+
+  dep.targetVersion = target.tag
+  dep.diff = getDiff(raw.currentVersion, target.tag)
+  dep.update = dep.diff !== null && dep.diff !== 'error'
+  dep.githubAction = {
+    ...info,
+    targetSha: pkgData.shaMap?.[target.tag] ?? pkgData.shaMap?.[target.resolvedTag],
+  }
+
+  return dep
 }
 
 export function getVersionOfRange(dep: ResolvedDepChange, range: RangeMode, options: CheckOptions) {
@@ -116,6 +284,16 @@ export function getFilteredVersions(dep: ResolvedDepChange, options: CheckOption
     filteredVersions = filterDeprecatedVersions(filteredVersions, deprecated)
   }
 
+  // `--exclude typescript@7` (or `typescript@^7||^8`) excludes only the matching versions,
+  // leaving the rest of the package's versions (e.g. v6) available for updates/interactive mode.
+  const excludeVersionRanges = getExcludeVersionRanges(dep.name, options)
+  if (excludeVersionRanges === true) {
+    filteredVersions = []
+  }
+  else if (excludeVersionRanges.length > 0) {
+    filteredVersions = filteredVersions.filter(version => !isVersionInExcludedRanges(version, excludeVersionRanges))
+  }
+
   const maturityPeriodExclude = getMaturityPeriodExcludeRanges(dep.name, options)
   if (options.maturityPeriod && options.maturityPeriod > 0 && maturityPeriodExclude !== true) {
     const maturityCandidates = filteredVersions
@@ -125,7 +303,7 @@ export function getFilteredVersions(dep: ResolvedDepChange, options: CheckOption
       const filteredVersionSet = new Set(filteredVersions)
       filteredVersions = maturityCandidates.filter(version =>
         filteredVersionSet.has(version)
-        || isVersionMaturityPeriodExcluded(version, maturityPeriodExclude),
+        || isVersionInExcludedRanges(version, maturityPeriodExclude),
       )
     }
   }
@@ -147,9 +325,9 @@ export function getVersionOfTag(dep: ResolvedDepChange, tag: string, options: Ch
   return filteredVersions.includes(version) ? version : undefined
 }
 
-export function getLatestVersionAvailable(dep: ResolvedDepChange, targetVersion: string | SemVer, options: CheckOptions) {
+export function getLatestVersionAvailable(dep: ResolvedDepChange, targetVersion: string, options: CheckOptions) {
   const version = getVersionOfRange(dep, 'latest', options)
-  return version && gt(version, targetVersion) ? version : undefined
+  return version && isGreater(version, targetVersion) ? version : undefined
 }
 
 export function updateTargetVersion(
@@ -175,25 +353,13 @@ export function updateTargetVersion(
     = !!(dep.currentProvenance && !dep.targetProvenance) // trusted -> none, provenance -> none
       || (dep.currentProvenance === 'trustedPublisher' && dep.targetProvenance === true) // trusted -> provenance
 
-  if (versionLocked && eq(dep.currentVersion, dep.targetVersion)) {
-    // for example: `taze`/`taze -P` is default mode (and it matched from patch to minor)
-    // - but this mode will always ignore the locked pkgs
-    // - so we need to reset the target
-    const { versions, time = {}, tags } = dep.pkgData
-    const targetVersion = getMaxSatisfying(dep.filteredVersions ?? versions, dep.currentVersion, 'minor', tags)
-    if (targetVersion) {
-      dep.targetVersion = targetVersion
-      dep.targetVersionTime = time[dep.targetVersion]
-    }
-  }
-
   try {
-    const current = minVersion(dep.currentVersion)!
-    const target = minVersion(dep.targetVersion)!
+    const current = findMinimumForRange(dep.currentVersion)!
+    const target = findMinimumForRange(dep.targetVersion)!
 
-    dep.currentVersionTime = dep.pkgData.time?.[current.toString()]
+    dep.currentVersionTime = dep.pkgData.time?.[current]
     dep.diff = getDiff(current, target)
-    dep.update = dep.diff !== null && lt(current, target)
+    dep.update = dep.diff !== null && isLess(current, target)
   }
   catch (e) {
     if (!forgiving)
@@ -204,8 +370,15 @@ export function updateTargetVersion(
   }
 }
 
-export function getDiff(current: SemVer, target: SemVer): DiffType {
-  if (eq(current, target))
+export function getDiff(current: string, target: string): DiffType {
+  // GitHub Action tags may be partial (e.g. `v4`), which `verkit` cannot parse
+  // directly; coerce them to a full semver so the diff can still be computed.
+  if (!isValid(current))
+    current = coerce(current) ?? current
+  if (!isValid(target))
+    target = coerce(target) ?? target
+
+  if (isEqual(current, target))
     return null
 
   const tilde = satisfies(target, `~${current}`, { includePrerelease: true })
@@ -233,6 +406,9 @@ export async function resolveDependency(
   options: CheckOptions,
   filter: DependencyFilter = () => true,
 ) {
+  if (raw.source === 'github-actions')
+    return resolveGitHubAction(raw, options, filter)
+
   const dep = { ...raw } as ResolvedDepChange
 
   const configMode = getPackageMode(dep.name, options)
@@ -277,7 +453,7 @@ export async function resolveDependency(
     resolvedName = packages.pop() ?? dep.name
   }
 
-  const pkgData = await getPackageData(resolvedName, dep.protocol, options.cwd)
+  const pkgData = await getPackageData(resolvedName, dep.protocol, options.cwd, options.requestTimeout, options.retry, options.fastNpmMetaApiEndpoint)
   const { error, deprecated } = pkgData
 
   dep.pkgData = pkgData
@@ -321,7 +497,7 @@ export async function resolveDependency(
   }
 
   try {
-    const targetVersion = minVersion(target || dep.targetVersion)
+    const targetVersion = findMinimumForRange(target || dep.targetVersion)
     if (targetVersion)
       dep.latestVersionAvailable = getLatestVersionAvailable(dep, targetVersion, options)
 
@@ -330,11 +506,11 @@ export async function resolveDependency(
       const currentNodeVersion = process.version
       const { nodeSemver } = dep.pkgData
       if (nodeSemver
-        && targetVersion?.version
-        && targetVersion?.version in nodeSemver) {
+        && targetVersion
+        && targetVersion in nodeSemver) {
         dep.nodeCompatibleVersion = {
-          compatible: satisfies(currentNodeVersion, nodeSemver[targetVersion?.version]),
-          semver: nodeSemver[targetVersion?.version],
+          compatible: satisfies(currentNodeVersion, nodeSemver[targetVersion]),
+          semver: nodeSemver[targetVersion],
         }
       }
     }

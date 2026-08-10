@@ -1,20 +1,42 @@
-import type { CheckOptions, PackageMeta, ResolvedDepChange } from '../src'
+import type { CheckOptions, PackageData, PackageMeta, ResolvedDepChange } from '../src'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { CheckPackages } from '../src'
-import { writePackageJSON } from '../src/io/packageJson'
+import { loadPackageJSON, writePackageJSON } from '../src/io/packageJson'
 import { getHexHashFromIntegrity } from '../src/utils/sha'
+
+const { fetchPackageMock } = vi.hoisted(() => ({
+  fetchPackageMock: vi.fn(),
+}))
+
+vi.mock('../src/utils/packument.ts', async importActual => ({
+  ...await importActual<typeof import('../src/utils/packument')>(),
+  fetchPackage: fetchPackageMock,
+}))
 
 function getPkgInfo(name: string, result: ResolvedDepChange[]) {
   return result.filter(r => r.name === name)[0]
 }
 
 const pnpmVersion = '10.23.0'
+const updatedPnpmVersion = '10.24.0'
 const pnpmIntegrity = 'sha512-IcTlaYACrel+Tv6Li0qJqN48haN5GflX56DzDzj7xbvdBZgP/ikXmy+25uaRJC4JjZRdFgF3LK0P71+2QR4qSw=='
+const updatedPnpmIntegrity = 'sha512-dXBkYXRlZC1wbnBtLWludGVncml0eQ=='
 const pnpmHexHash = '21c4e5698002ade97e4efe8b8b4a89a8de3c85a37919f957e7a0f30f38fbc5bbdd05980ffe29179b2fb6e6e691242e098d945d1601772cad0fef5fb6411e2a4b'
+
+const pnpmPackageData: PackageData = {
+  tags: { latest: updatedPnpmVersion },
+  versions: [pnpmVersion, updatedPnpmVersion],
+  integrity: {
+    [pnpmVersion]: pnpmIntegrity,
+    [updatedPnpmVersion]: updatedPnpmIntegrity,
+  },
+}
+
+fetchPackageMock.mockResolvedValue(pnpmPackageData)
 
 const originalPkgJson = {
   name: '@taze/package-manager',
@@ -26,6 +48,18 @@ const originalPkgJsonWithSha = {
   name: '@taze/package-manager-sha',
   private: true,
   packageManager: `pnpm@${pnpmVersion}+sha512.${pnpmHexHash}`,
+}
+
+const originalPkgJsonWithDevEngines = {
+  name: '@taze/dev-engines-package-manager',
+  private: true,
+  devEngines: {
+    packageManager: {
+      name: 'pnpm',
+      version: `^${pnpmVersion}`,
+      onFail: 'warn',
+    },
+  },
 }
 
 describe('get hex hash from integrity', () => {
@@ -79,6 +113,43 @@ describe('check package for packageManager', () => {
     expect(updatedPnpmInfo.currentVersion).not.toBe(`^${pnpmVersion}`)
     const pkgJson = JSON.parse(fs.readFileSync(path.join(tempDir, 'package.json'), 'utf-8'))
     expect(pkgJson.packageManager).toBe(`pnpm@${updatedPnpmInfo.currentVersion.slice(1)}`)
+  })
+
+  it('write updated devEngines.packageManager to package.json', async () => {
+    fs.writeFileSync(
+      path.join(tempDir, 'package.json'),
+      JSON.stringify(originalPkgJsonWithDevEngines, null, 2),
+    )
+    const options: CheckOptions = {
+      cwd: tempDir,
+      mode: 'default',
+      write: true,
+      force: true,
+    }
+    await CheckPackages(options, {})
+    const updatedResult = (await CheckPackages(options, {})).packages[0].resolved
+    const updatedPnpmInfo = getPkgInfo('pnpm', updatedResult)
+    const pkgJson = JSON.parse(fs.readFileSync(path.join(tempDir, 'package.json'), 'utf-8'))
+
+    expect(updatedPnpmInfo.update).toBe(false)
+    expect(pkgJson.packageManager).toBeUndefined()
+    expect(pkgJson.devEngines.packageManager).toEqual({
+      ...originalPkgJsonWithDevEngines.devEngines.packageManager,
+      version: updatedPnpmInfo.currentVersion,
+    })
+  })
+
+  it.each([
+    ['missing name', { devEngines: { packageManager: { version: '^10.0.0' } } }, undefined, undefined],
+    ['missing version', { devEngines: { packageManager: { name: 'pnpm' } } }, undefined, undefined],
+    ['incomplete fallback', { packageManager: 'npm@10.0.0', devEngines: { packageManager: { name: 'pnpm' } } }, 'npm', '^10.0.0'],
+    ['packageManager priority', { packageManager: 'npm@10.0.0', devEngines: { packageManager: { name: 'pnpm', version: '^10.0.0' } } }, 'npm', '^10.0.0'],
+  ])('%s', async (_, raw, name, version) => {
+    const [pkg] = await loadPackageJSON('package.json', {}, () => true, raw)
+    const packageManager = pkg.deps.find(dep => dep.source === 'packageManager')
+
+    expect(packageManager?.name).toBe(name)
+    expect(packageManager?.currentVersion).toBe(version)
   })
 })
 
