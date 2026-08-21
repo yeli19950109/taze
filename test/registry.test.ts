@@ -1,6 +1,7 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import c from 'ansis'
 import { fetch } from 'ofetch'
 import { exec } from 'tinyexec'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -73,7 +74,7 @@ describe('registry commands', () => {
 
     await listRegistries()
 
-    const lines = stdout.join('\n').split('\n').filter(Boolean)
+    const lines = stdout.join('\n').split('\n').filter(Boolean).map(line => c.strip(line))
     expect(lines.some(line => line.includes('* npm'))).toBe(true)
     expect(lines.some(line => line.includes('taobao'))).toBe(true)
     expect(lines.length).toBe(Object.keys(REGISTRIES).length)

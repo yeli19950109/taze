@@ -3,6 +3,7 @@ import type { Agent } from 'package-manager-detector'
 import type { PnpmWorkspaceYaml } from 'pnpm-workspace-yaml'
 import type { Document, Scalar } from 'yaml'
 import type { MODE_CHOICES } from './constants'
+import type { Manifest } from './manifests/types'
 import type { SortOption } from './utils/sort'
 
 export type { RetryOptions }
@@ -22,6 +23,8 @@ export type DepType
     | 'bun-workspace'
     | 'yarn-workspace'
     | 'github-actions'
+    | 'node-version'
+    | 'devEngines.runtime'
 
 export const DependenciesTypeShortMap = {
   'packageManager': 'package-manager',
@@ -36,20 +39,40 @@ export const DependenciesTypeShortMap = {
   'bun-workspace': 'bun-workspace',
   'yarn-workspace': 'yarn-workspace',
   'github-actions': 'github-actions',
+  'node-version': 'node-version',
+  'devEngines.runtime': 'devEngines.runtime',
 }
 
 export type Protocol = 'npm' | 'jsr'
 
+/**
+ * The ecosystem a dependency belongs to, which decides how its versions are
+ * fetched and resolved. This is the routing key for the registry axis
+ * (`src/registries/*`) — orthogonal to {@link RawDep.source}, which describes
+ * where* inside a manifest the dependency lives.
+ */
+export type PackageType = 'npm' | 'github-actions' | 'jsr' | 'node'
+
 export interface RawDep {
   name: string
   currentVersion: string
+  /**
+   * Where the dependency lives inside its manifest (dependency field, catalog,
+   * override, etc.). Also drives grouping/labelling in the output.
+   */
   source: DepType
+  /**
+   * Which ecosystem the dependency belongs to. Decides which registry
+   * (`src/registries/*`) resolves it. Defaults to `'npm'` when omitted.
+   */
+  packageType?: PackageType
   update: boolean
   parents?: string[]
   protocol?: Protocol
   hexHash?: string
   /**
-   * Extra metadata carried by GitHub Actions dependencies (`source: 'github-actions'`).
+   * Extra metadata carried by GitHub Actions dependencies
+   * (`packageType: 'github-actions'`).
    * Describes how the `uses:` reference is written so it can be updated in place.
    */
   githubAction?: GitHubActionInfo
@@ -196,6 +219,18 @@ export interface CommonOptions {
    */
   addons?: Addon[]
   /**
+   * Custom manifests (file sources) to check, merged with the built-in ones.
+   *
+   * Custom manifests take precedence over the built-ins when matching a file or
+   * routing a write, so they can extend taze with new file types or override
+   * how an existing one is handled. To be discovered, a custom manifest should
+   * provide a `discover` hook.
+   *
+   * Only available programmatically or from a JS/TS config file
+   * (`taze.config.ts`), not from `.tazerc.json`.
+   */
+  manifests?: Manifest[]
+  /**
    * Check and update GitHub Actions referenced in `.github/workflows/*.yml`
    * and composite `action.yml` files.
    *
@@ -205,6 +240,15 @@ export interface CommonOptions {
    * @default true
    */
   githubActions?: boolean | GitHubActionsOptions
+  /**
+   * Check and update the Node.js version declared in `.node-version` and
+   * `.nvmrc` files.
+   *
+   * Enabled by default. Set to `false` to opt out.
+   *
+   * @default true
+   */
+  nodeVersion?: boolean
 }
 
 export type DepFieldOptions = Partial<Record<DepType, boolean>>
@@ -383,6 +427,23 @@ export interface GitHubActionMeta extends BasePackageMeta {
   yamlDocument: Document
 }
 
+export interface NodeVersionMeta extends BasePackageMeta {
+  /**
+   * File type — a `.node-version` or `.nvmrc` file
+   */
+  type: 'node-version'
+  /**
+   * The file content split around the version token, so it can be rewritten in
+   * place while preserving comments, blank lines and formatting.
+   */
+  raw: NodeVersionFileRaw
+}
+
+export interface NodeVersionFileRaw extends Record<string, unknown> {
+  prefix: string
+  suffix: string
+}
+
 export type PackageMeta
   = | PackageJsonMeta
     | GlobalPackageMeta
@@ -391,6 +452,7 @@ export type PackageMeta
     | YarnWorkspaceMeta
     | PackageYamlMeta
     | GitHubActionMeta
+    | NodeVersionMeta
 
 export type DependencyFilter = (dep: RawDep) => boolean | Promise<boolean>
 export type DependencyResolvedCallback = (packageName: string | null, depName: string, progress: number, total: number) => void

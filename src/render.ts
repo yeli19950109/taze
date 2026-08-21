@@ -4,7 +4,7 @@ import process from 'node:process'
 import readline from 'node:readline'
 import { stripVTControlCharacters } from 'node:util'
 import c from 'ansis'
-import { getDiff } from './io/resolves'
+import { getDiff } from './registries'
 
 import { DiffColorMap } from './utils/diff'
 
@@ -17,7 +17,7 @@ const ERASE_LINE_SUFFIX = '\u001B[K'
 const HIDE_CURSOR_SEQUENCE = '\u001B[?25l'
 const SHOW_CURSOR_SEQUENCE = '\u001B[?25h'
 
-export function visualLength(str: string) {
+function visualLength(str: string) {
   if (str === '')
     return 0
 
@@ -48,11 +48,11 @@ export function visualLength(str: string) {
   return width
 }
 
-export function visualPadStart(str: string, pad: number, char = ' ') {
+function visualPadStart(str: string, pad: number, char = ' ') {
   return str.padStart(pad - visualLength(str) + str.length, char)
 }
 
-export function visualPadEnd(str: string, pad: number, char = ' ') {
+function visualPadEnd(str: string, pad: number, char = ' ') {
   return str.padEnd(pad - visualLength(str) + str.length, char)
 }
 

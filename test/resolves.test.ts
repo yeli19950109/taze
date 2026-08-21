@@ -2,7 +2,7 @@ import type { CheckOptions, DependencyFilter, PackageData, RawDep, ResolvedDepCh
 import process from 'node:process'
 import { expect, it, vi } from 'vitest'
 import { resolveDependency } from '../src'
-import { getDiff, getLatestVersionAvailable, getVersionOfRange, getVersionOfTag, updateTargetVersion } from '../src/io/resolves'
+import { getDiff, getLatestVersionAvailable, getVersionOfRange, getVersionOfTag, updateTargetVersion } from '../src/registries'
 
 // `resolveDependency` fetches package metadata over the network. Mock it so
 // the test suite is deterministic and doesn't depend on (or hammer) the real
@@ -252,6 +252,23 @@ it('keeps locked dependencies within patch range in patch mode', async () => {
   expect(noPatchUpdate.targetVersion).toBe('4.0.5')
   expect(noPatchUpdate.update).toBe(false)
   expect(noPatchUpdate.latestVersionAvailable).toBe('6.0.0')
+})
+
+it('includes locked dependencies within minor range in default mode', async () => {
+  const defaultOptions = {
+    ...options,
+    mode: 'default' as const,
+    includeLocked: true,
+  }
+
+  const minorUpdate = await resolveDependency(makePkg('4.0.0'), defaultOptions, filter)
+  expect(minorUpdate.targetVersion).toBe('4.9.5')
+  expect(minorUpdate.update).toBe(true)
+
+  const noMinorUpdate = await resolveDependency(makePkg('4.9.5'), defaultOptions, filter)
+  expect(noMinorUpdate.targetVersion).toBe('4.9.5')
+  expect(noMinorUpdate.update).toBe(false)
+  expect(noMinorUpdate.latestVersionAvailable).toBe('6.0.0')
 })
 
 it('resolveDependency', async () => {
