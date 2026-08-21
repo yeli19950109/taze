@@ -104,6 +104,29 @@ Check up to <b>patch</b> updates
 
 `taze` has the built-in first-class monorepo support. Simply adding `-r` will scan the subdirectories that contain `package.json` and update them together. It will handle local private packages automatically.
 
+To diagnose missing packages in a complex workspace, enable the workspace-only
+debug output. It reports discovered and excluded manifests, the final workspace
+list, and each workspace's dependency names, current versions, fields, and
+registry types. Registry requests and version-selection decisions are not
+included.
+
+```bash
+uploom -r --debug
+# Equivalent namespace-only form:
+DEBUG=taze:workspace uploom -r
+```
+
+Debug lines are written to stderr, so they can be captured separately:
+
+```bash
+uploom -r --debug 2> uploom-workspaces.log
+```
+
+`--loglevel debug` enables the same workspace-only diagnostics. If a nested
+workspace is intentionally being pruned because it has its own `.git`,
+`pnpm-workspace.yaml`, `.yarnrc.yml`, or Bun lockfile, the output includes that
+reason. Use `--no-ignore-other-workspaces` to include those nested workspaces.
+
 <p align='center'>
 <img src='./screenshots/r-default.png' width='600' alt='Recursive mode default' />
 </p>

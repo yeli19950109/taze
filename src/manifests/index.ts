@@ -2,6 +2,7 @@ import type { CommonOptions, PackageMeta } from '../types'
 import type { Manifest } from './types'
 import process from 'node:process'
 import { up as findUp } from 'empathic/find'
+import { createDebug } from 'obug'
 import { dirname, join, resolve } from 'pathe'
 import { glob } from 'tinyglobby'
 import { DEFAULT_IGNORE_PATHS } from '../constants'
@@ -13,6 +14,8 @@ import { packageJsonManifest } from './package-json'
 import { packageYamlManifest } from './package-yaml'
 import { pnpmWorkspaceManifest } from './pnpm-workspace'
 import { yarnWorkspaceManifest } from './yarn-workspace'
+
+const debug = createDebug('taze:workspace')
 
 export { dumpDependencies, parseDependencies } from './dependencies'
 export type { Manifest } from './types'
@@ -67,6 +70,7 @@ export async function loadPackage(
   const filepath = resolve(options.cwd ?? '', relative)
   const manifest = getManifests(options).find(m => isManifestEnabled(m, options) && m.match(filepath))
     ?? packageJsonManifest
+  debug('load %s with manifest=%s', relative, manifest.name)
   return manifest.load(relative, options, shouldUpdate)
 }
 
@@ -77,12 +81,21 @@ export async function loadPackage(
  */
 async function discoverPackageFiles(options: CommonOptions): Promise<string[]> {
   const cwd = resolve(options.cwd || process.cwd())
+  const ignore = DEFAULT_IGNORE_PATHS.concat(options.ignorePaths || [])
   let packagesNames: string[] = []
+
+  debug(
+    'scan root=%s recursive=%s ignoreOtherWorkspaces=%s',
+    cwd,
+    !!options.recursive,
+    !!options.ignoreOtherWorkspaces,
+  )
+  debug('ignore patterns=%O', ignore)
 
   if (options.recursive) {
     // Look for both package.yaml and package.json files
     const yamlPackages = await glob('**/package.yaml', {
-      ignore: DEFAULT_IGNORE_PATHS.concat(options.ignorePaths || []),
+      ignore,
       cwd: options.cwd,
       onlyFiles: true,
       dot: false,
@@ -90,7 +103,7 @@ async function discoverPackageFiles(options: CommonOptions): Promise<string[]> {
     })
 
     const jsonPackages = await glob('**/package.json', {
-      ignore: DEFAULT_IGNORE_PATHS.concat(options.ignorePaths || []),
+      ignore,
       cwd: options.cwd,
       onlyFiles: true,
       dot: false,
@@ -113,6 +126,9 @@ async function discoverPackageFiles(options: CommonOptions): Promise<string[]> {
       if (!packageDirs.has(dir)) {
         packagesNames.push(jsonPkg)
       }
+      else {
+        debug('exclude %s: package.yaml takes precedence in the same directory', jsonPkg)
+      }
     }
   }
   else {
@@ -120,6 +136,7 @@ async function discoverPackageFiles(options: CommonOptions): Promise<string[]> {
   }
 
   packagesNames = packagesNames.sort((a, b) => a.localeCompare(b))
+  debug('package manifest candidates=%O', packagesNames)
 
   if (options.ignoreOtherWorkspaces) {
     packagesNames = (await Promise.all(
@@ -129,22 +146,32 @@ async function discoverPackageFiles(options: CommonOptions): Promise<string[]> {
 
         const absolute = join(cwd, packagePath)
         const gitDir = findUp('.git', { cwd: absolute, last: cwd })
-        if (gitDir && dirname(gitDir) !== cwd)
+        if (gitDir && dirname(gitDir) !== cwd) {
+          debug('exclude %s: nested Git root at %s', packagePath, dirname(gitDir))
           return []
+        }
         const pnpmWorkspace = findUp('pnpm-workspace.yaml', { cwd: absolute, last: cwd })
-        if (pnpmWorkspace && dirname(pnpmWorkspace) !== cwd)
+        if (pnpmWorkspace && dirname(pnpmWorkspace) !== cwd) {
+          debug('exclude %s: nested pnpm workspace at %s', packagePath, dirname(pnpmWorkspace))
           return []
+        }
         const yarnWorkspace = findUp('.yarnrc.yml', { cwd: absolute, last: cwd })
-        if (yarnWorkspace && dirname(yarnWorkspace) !== cwd)
+        if (yarnWorkspace && dirname(yarnWorkspace) !== cwd) {
+          debug('exclude %s: nested Yarn workspace at %s', packagePath, dirname(yarnWorkspace))
           return []
+        }
         const bunLock = findUp('bun.lockb', { cwd: absolute, last: cwd })
           || findUp('bun.lock', { cwd: absolute, last: cwd })
-        if (bunLock && dirname(bunLock) !== cwd)
+        if (bunLock && dirname(bunLock) !== cwd) {
+          debug('exclude %s: nested Bun workspace at %s', packagePath, dirname(bunLock))
           return []
+        }
         return [packagePath]
       }),
     )).flat()
   }
+
+  debug('selected package manifests=%O', packagesNames)
 
   return packagesNames
 }
@@ -160,9 +187,15 @@ export async function loadPackages(options: CommonOptions): Promise<PackageMeta[
   ]
 
   for (const manifest of getManifests(options)) {
-    if (!manifest.discover || !isManifestEnabled(manifest, options))
+    if (!manifest.discover)
       continue
-    groups.push({ order: manifest.order ?? 0, paths: await manifest.discover(options) })
+    if (!isManifestEnabled(manifest, options)) {
+      debug('manifest %s disabled', manifest.name)
+      continue
+    }
+    const paths = await manifest.discover(options)
+    debug('manifest %s discovered=%O', manifest.name, paths)
+    groups.push({ order: manifest.order ?? 0, paths })
   }
 
   groups.sort((a, b) => a.order - b.order)
@@ -173,6 +206,27 @@ export async function loadPackages(options: CommonOptions): Promise<PackageMeta[
       relative => loadPackage(relative, options, filter),
     ),
   )).flat()
+
+  for (const pkg of packages) {
+    const kind = pkg.type === 'package.json' || pkg.type === 'package.yaml'
+      ? 'workspace'
+      : 'manifest'
+    debug(
+      `${kind} path=%s name=%s type=%s private=%s dependencies=%O`,
+      pkg.relative,
+      pkg.name || '(unnamed)',
+      pkg.type,
+      pkg.private,
+      pkg.deps.map(dep => ({
+        name: dep.name,
+        version: dep.currentVersion,
+        source: dep.source,
+        packageType: dep.packageType ?? dep.protocol ?? 'npm',
+      })),
+    )
+  }
+  const workspaceCount = packages.filter(pkg => pkg.type === 'package.json' || pkg.type === 'package.yaml').length
+  debug('loaded workspaces=%d total manifests=%d', workspaceCount, packages.length)
 
   return packages
 }

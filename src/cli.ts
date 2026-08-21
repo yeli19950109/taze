@@ -19,6 +19,7 @@ registerRegistryCommands(cli)
 cli
   .command('[mode]', `Update mode (version range to check). Available: ${MODE_CHOICES.join(' | ')}`)
   .option('--cwd, -C <cwd>', 'specify the current working directory')
+  .option('--debug', 'print workspace discovery and dependency details')
   .option('--loglevel <level>', `log level (${LOG_LEVELS.join('|')})`)
   .option('--fail-on-outdated', 'exit with code 1 if outdated dependencies are found')
   .option('--silent, -s', 'complete silent')

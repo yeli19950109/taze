@@ -2,7 +2,7 @@ import type { CheckOptions, CommonOptions, GitHubActionStyle, RetryOptions } fro
 import process from 'node:process'
 import { toArray } from '@antfu/utils'
 import deepmerge from 'deepmerge'
-import { createDebug } from 'obug'
+import { createDebug, enable as enableDebug } from 'obug'
 import { createConfigLoader } from 'unconfig'
 import { DEFAULT_CHECK_OPTIONS } from './constants'
 import { inferConfig } from './utils/inferConfig'
@@ -17,6 +17,8 @@ const debug = createDebug('taze:config')
  * `CheckOptions` form by {@link resolveConfig}.
  */
 export interface CliOptions extends Omit<CheckOptions, 'retry'> {
+  /** Print workspace discovery and dependency details. */
+  debug?: boolean
   /**
    * `true` for a bare `--retry`, `false` for `--no-retry`, a number for a
    * retry count, or a structured {@link RetryOptions} object.
@@ -35,6 +37,7 @@ export interface CliOptions extends Omit<CheckOptions, 'retry'> {
  */
 function normalizeCliOptions(input: CliOptions): CommonOptions {
   const {
+    debug: workspaceDebug,
     retry,
     retryFactor: factor,
     retryMinTimeout: minTimeout,
@@ -43,6 +46,11 @@ function normalizeCliOptions(input: CliOptions): CommonOptions {
     githubActionsStyle,
     ...rest
   } = input
+
+  // Keep CLI diagnostics narrowly scoped to workspace discovery. In
+  // particular, don't enable registry requests or version-resolution traces.
+  if (workspaceDebug || rest.loglevel === 'debug')
+    enableDebug('taze:workspace')
 
   const options = rest as CheckOptions
 
@@ -124,6 +132,10 @@ export async function resolveConfig(
     const configOptions = normalizeConfig(config.config)
     merged = deepmerge(deepmerge(defaults, configOptions), options)
   }
+
+  // Config files can also opt into the same workspace-only diagnostics.
+  if (merged.loglevel === 'debug')
+    enableDebug('taze:workspace')
 
   const checkMerged = merged as CheckOptions
   if (!checkMerged.global) {
