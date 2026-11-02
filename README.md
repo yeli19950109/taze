@@ -40,6 +40,7 @@ npm i -g uploom        # → uploom（更短的 npx 入口）
   - 自定义镜像列表保存在 `~/.taze/registries.yaml`（YAML 格式）
   - 首次运行可自动从 `~/.nrmrc` 迁移
 - **双包发布**：CI 使用 `pnpm -r publish` 同时发布 `@whyjs/taze` 与 `uploom`
+- **清理垃圾目录**（移植自 [npkill](https://github.com/voidcosmos/npkill) 0.12.2）：`taze clean`，全屏 TUI，见下文
 
 ### 镜像管理命令
 
@@ -57,6 +58,33 @@ taze reg test [name]          # 测速
 npx uploom reg use taobao
 npx uploom minor -w
 ```
+
+### 清理命令（taze clean）
+
+移植自 npkill：扫描目录，找出 `node_modules`、构建产物、缓存等目录，计算大小和项目最近修改时间，在全屏 TUI 中删除。
+
+```bash
+taze clean                    # 扫描当前目录（默认 node profile）
+taze clean ~/projects         # 扫描指定目录（也可用 -d）
+taze clean -f                 # 从 HOME 开始扫描
+taze clean -p                 # 列出所有 profile
+taze clean -p node,python     # 组合 profile
+taze clean -t node_modules    # 自定义目标目录名（覆盖 profile）
+taze clean -E vendor,tmp      # 排除路径
+taze clean -x                 # 排除敏感目录（应用内部、HOME 下隐藏目录等）
+taze clean --older-than 90    # 只显示 90 天未改动的项目
+taze clean -s size            # 排序：none | size | path | age
+taze clean -D                 # 找到即删（会先警告，-y 跳过）
+taze clean --dry-run          # 只模拟删除
+taze clean --json             # 输出 JSON（--json-stream 逐行输出）
+taze clean --no-size --no-age # 跳过大小 / 年龄计算（--no-stats 两者都跳过）
+```
+
+TUI 按键：`↑↓/jk` 移动，`PgUp/PgDn` 翻页，`Home/End` 首尾，`空格/Del` 删除，`t` 多选模式（`空格` 勾选、`v` 区间、`a` 全选、`回车` 删除所选），`/` 正则搜索，`s` 切换排序，`o` 打开所在目录，`←→` 切换 帮助 / 选项 / 结果 / 详情 面板，`e` 错误列表，`q` 退出。敏感目录需按两次空格确认。
+
+配置文件兼容 npkill 的 `.npkillrc`（JSON，优先级：`--config` > `./.npkillrc` > `~/.npkillrc`），支持 `rootDir`、`exclude`、`sortBy`、`sizeUnit`、`excludeSensitiveResults`、`dryRun`、`defaultProfiles` 和自定义 `profiles`。
+
+非终端环境（管道、CI）下输出纯文本列表；`--delete-all` 需配合 `-y`。Unix 上大小用 `du -sk` 计算，删除用 `rm -rf`；Windows 上使用 Node 原生实现。
 
 ## Features
 
