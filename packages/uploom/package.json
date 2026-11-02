@@ -1,7 +1,7 @@
 {
   "name": "uploom",
   "type": "module",
-  "version": "21.3.0-fix.7",
+  "version": "21.3.0-fix.8",
   "description": "CLI alias for @whyjs/taze",
   "license": "MIT",
   "homepage": "https://github.com/yeli19950109/taze#readme",
