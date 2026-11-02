@@ -8,7 +8,7 @@ import type {
 } from '../../types'
 import { stripVTControlCharacters } from 'node:util'
 import c from 'ansis'
-import { findMinimumForRange } from 'verkit'
+import { findMinimumForRange, normalize } from 'verkit'
 import {
   colorizeNodeCompatibility,
   colorizeVersionDiff,
@@ -50,12 +50,14 @@ function renderChange(
     c.gray(change.currentVersion),
     update ? c.dim.gray('→') : '',
     update
-      ? colorizeVersionDiff(change.currentVersion, change.targetVersion)
+      ? change.diff === 'pin'
+        ? `${c.blue(change.githubAction?.targetSha?.slice(0, 7) ?? change.targetVersion)} ${c.dim(`# ${change.targetVersion}`)}`
+        : colorizeVersionDiff(change.currentVersion, change.targetVersion)
       : c.gray.strikethrough(change.targetVersion),
     update && timediff
       ? timeDifference(change.targetVersionTime)
       : '',
-    (change.latestVersionAvailable && findMinimumForRange(change.targetVersion) !== change.latestVersionAvailable)
+    (change.latestVersionAvailable && normalize(findMinimumForRange(change.targetVersion) ?? change.targetVersion) !== change.latestVersionAvailable)
       ? c.dim.magenta`(${change.latestVersionAvailable} available)`
       : '',
     nodecompat
