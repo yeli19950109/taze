@@ -1,6 +1,7 @@
 import type { CheckOptions, DependencyFilter, DiffType, PackageData, RangeMode, RawDep, ResolvedDepChange } from '../../types'
 import { coerce, isValid, normalize } from 'verkit'
 import { getExcludeVersionRanges, getMaturityPeriodExcludeRanges, isVersionInExcludedRanges } from '../../utils/config'
+import { runQueued } from '../../utils/context'
 import { fetchActionTags, fetchCommitDate, resolveGitHubActionStyle, selectTarget } from '../../utils/github'
 import { getCachedData } from '../cache'
 import { getDiff as getSemverDiff, mergeMode } from '../shared'
@@ -103,7 +104,7 @@ async function resolveGitHubAction(
         && isVersionInExcludedRanges(coerced, maturityExclude)
       if (!isMaturityExcluded) {
         const sha = pkgData.shaMap?.[picked.resolvedTag]
-        const date = sha ? await fetchCommitDate(info.repo, sha, options.requestTimeout) : undefined
+        const date = sha ? await runQueued(() => fetchCommitDate(info.repo, sha, options.requestTimeout)) : undefined
         if (date && new Date(date).getTime() > cutoff) {
           rejectedForMaturity.add(picked.resolvedTag)
           continue

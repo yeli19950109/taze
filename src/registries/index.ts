@@ -8,7 +8,7 @@ import { jsrRegistry } from './jsr'
 import { nodeRegistry } from './node'
 import { npmRegistry } from './npm'
 
-export { dumpCache, loadCache } from './cache'
+export { dumpCache, loadCache, resetFailedRequests } from './cache'
 
 export { getGitHubActionDiff } from './github-actions/registry'
 export {
@@ -59,18 +59,23 @@ export async function resolveDependencies(
     concurrency = 10,
   } = options
 
-  // resolveDependencies may be called standalone without going through CheckPackages, so we need
-  // to fallback (that respects concurrency option) if it's not in the CheckPackages context.
-  const queue = queueContext.getStore() || newQueue(concurrency)
-
-  return Promise.all(
-    deps.map(raw => queue.add(async () => {
+  const run = () => Promise.all(
+    deps.map(async (raw) => {
       const dep = await resolveDependency(raw, options, filter)
       counter += 1
       progressCallback(raw.name, counter, total)
       return dep
-    })),
+    }),
   )
+
+  // The queue limits network requests, not resolutions (see `getCachedData`),
+  // so a dependency that is cached or already in flight never waits behind
+  // unrelated requests. resolveDependencies may be called standalone without
+  // going through CheckPackages, so fall back to a queue that respects the
+  // concurrency option.
+  if (queueContext.getStore())
+    return run()
+  return queueContext.run(newQueue(concurrency), run)
 }
 
 export async function resolvePackage(pkg: PackageMeta, options: CheckOptions, filter?: DependencyFilter, progress?: DependencyResolvedCallback) {

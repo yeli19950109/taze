@@ -61,17 +61,58 @@ it('times out promptly even when upstream ignores abort settlement', async () =>
   }))
 
   getVersionsMock.mockImplementation((_spec, options) => {
-    options.fetch('https://registry.npmjs.org/drizzle-orm')
+    options.fetch('https://registry.npmjs.org/drizzle-orm').catch(() => {})
     return new Promise(() => {})
   })
 
-  const promise = fetchPackage('drizzle-orm', false, undefined, 25)
+  const promise = fetchPackage('drizzle-orm', false, undefined, 25, false)
   const rejection = expect(promise).rejects.toThrow('Timeout requesting "drizzle-orm"')
 
   await vi.advanceTimersByTimeAsync(25)
 
   await rejection
   expect(aborted).toBe(true)
+})
+
+it('gives each retry attempt its own timeout', async () => {
+  vi.useFakeTimers()
+
+  let calls = 0
+  ofetchMock.mockImplementation((_input, init) => new Promise((resolve, reject) => {
+    calls += 1
+    const signal = init?.signal as AbortSignal | undefined
+    signal?.addEventListener('abort', () => reject(signal.reason))
+    // the first attempt hangs, the second one answers after 20ms
+    if (calls > 1)
+      setTimeout(() => resolve({ ok: true }), 20)
+  }))
+
+  // a minimal stand-in for get-npm-meta's retry loop
+  getVersionsMock.mockImplementation(async (_spec, options) => {
+    for (let i = 0; ; i++) {
+      try {
+        await options.fetch('https://registry.npmjs.org/drizzle-orm')
+        return {
+          distTags: { latest: '1.0.0' },
+          timeCreated: '',
+          timeModified: '',
+          versionsMeta: { '1.0.0': {} },
+        }
+      }
+      catch (e) {
+        if (i >= options.retry.retries)
+          throw e
+      }
+    }
+  })
+
+  const promise = fetchPackage('drizzle-orm', false, undefined, 25, 2)
+  await vi.advanceTimersByTimeAsync(25 + 20)
+
+  // with a single budget for all attempts the second attempt would be cut off at 25ms
+  await expect(promise).resolves.toMatchObject({ versions: ['1.0.0'] })
+  expect(calls).toBe(2)
+  expect(vi.getTimerCount()).toBe(0)
 })
 
 it('clears the timeout after a successful request', async () => {

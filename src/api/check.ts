@@ -1,7 +1,7 @@
 import type { CheckOptions, DependencyFilter, DependencyResolvedCallback, PackageMeta, RawDep } from '../types'
 import { newQueue } from '@henrygd/queue'
 import { loadPackages, writePackage } from '../manifests'
-import { dumpCache, loadCache, resolvePackage } from '../registries'
+import { dumpCache, loadCache, resetFailedRequests, resolvePackage } from '../registries'
 import { queueContext } from '../utils/context'
 
 export interface CheckEventCallbacks {
@@ -17,6 +17,7 @@ export interface CheckEventCallbacks {
 export async function CheckPackages(options: CheckOptions, callbacks: CheckEventCallbacks = {}) {
   if (!options.force)
     await loadCache()
+  resetFailedRequests()
 
   // packages loading
   const packages = await loadPackages(options)
