@@ -1,3 +1,4 @@
+/* eslint-disable no-console */
 /**
  * Live checks against the fast-npm-meta batch API (https://npm.antfu.dev),
  * through the same `get-npm-meta` entry point taze would use for batching.
