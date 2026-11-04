@@ -5,65 +5,29 @@ import { getExcludeVersionRanges, getMaturityPeriodExcludeRanges, isVersionInExc
 import { parsePnpmPackagePath, parseYarnPackagePath } from '../../utils/package'
 import { fetchJsrPackageMeta, fetchPackage } from '../../utils/packument'
 import { filterDeprecatedVersions, filterVersionsByMaturityPeriod, getMaxSatisfying, getPrefixedVersion } from '../../utils/versions'
-import { cache, cacheTTL, debug, inflightRequests, markCacheChanged, now, ttl } from '../cache'
+import { getCachedData } from '../cache'
 import { getDiff, mergeMode } from '../shared'
 
 export async function getPackageData(name: string, protocol: Protocol = 'npm', cwd?: string, requestTimeout?: number, retry?: number | false | RetryOptions, fastNpmMetaApiEndpoint?: string): Promise<PackageData> {
-  let error: any
   const cacheName = protocol === 'npm' && fastNpmMetaApiEndpoint
     ? `${protocol}:${fastNpmMetaApiEndpoint}:${name}`
     : `${protocol}:${name}`
 
-  if (cache[cacheName]) {
-    if (ttl(cache[cacheName].cacheTime) < cacheTTL) {
-      debug.cache(`cache hit for ${cacheName}`)
-      return cache[cacheName].data
-    }
-    else {
-      delete cache[cacheName]
-    }
-  }
-
-  const inflightRequest = inflightRequests.get(cacheName)
-
-  if (inflightRequest) {
-    debug.cache(`in-flight hit for ${cacheName}`)
-    return inflightRequest
-  }
-
-  const request = (async () => {
+  return getCachedData(cacheName, async () => {
     try {
-      debug.resolve(`resolving ${cacheName}`)
-      const data = protocol === 'jsr'
+      return protocol === 'jsr'
         ? await fetchJsrPackageMeta(name, requestTimeout)
         : await fetchPackage(name, false, cwd, requestTimeout, retry, fastNpmMetaApiEndpoint)
-
-      if (data) {
-        cache[cacheName] = { data, cacheTime: now() }
-        markCacheChanged()
-        return data
+    }
+    catch (error: any) {
+      return {
+        tags: {},
+        versions: [],
+        error: error?.statusCode?.toString() || error,
+        deprecated: {},
       }
     }
-    catch (e) {
-      error = e
-    }
-
-    return {
-      tags: {},
-      versions: [],
-      error: error?.statusCode?.toString() || error,
-      deprecated: {},
-    }
-  })()
-
-  inflightRequests.set(cacheName, request)
-
-  try {
-    return await request
-  }
-  finally {
-    inflightRequests.delete(cacheName)
-  }
+  })
 }
 
 export function getVersionOfRange(dep: ResolvedDepChange, range: RangeMode, options: CheckOptions) {
